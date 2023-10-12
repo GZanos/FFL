@@ -1,0 +1,223 @@
+
+
+# Required packages
+library(FuzzyR)
+library(openxlsx)
+library(FuzzyNumbers)
+library(Rfast)
+#--------------------------------------------------------------------------------------------------#
+
+# Set Up Parameters
+coef.file <- "coef.csv"             # Coefficients CSV file name
+data.file <- "online_data.csv"      # Data CSV file name
+response_var <- "Class"             # Define the response variable name
+Fuzzification_factor <- 2.5         # Sets m for binary fuzzification
+left_point_symmetry <- 1            # Sets l for binary fuzzification asymmetry
+right_point_symmetry <- 1           # Sets r for binary fuzzification asymmetry
+fuzzy.Y.max <- 1.5                  # Sets max for unif of binary fuzzification
+fuzzy.threshold <- c(0.4,0.5,0.6)   # Sets fuzzy threshold
+#--------------------------------------------------------------------------------------------------#
+
+# Import the data
+coef_df <- read.table(coef.file, header = TRUE, sep = ",", nrows = 30)
+coef_matrix <- as.matrix(coef_df)
+training_data_df <- read.csv(data.file)
+#--------------------------------------------------------------------------------------------------#
+
+
+#############################################
+#### Required Functions & Error Measures ####
+#############################################
+
+# Addition Function
+add_TFN <- function(TFN1, TFN2) {
+  TFN3 <- c((TFN1[1]+TFN2[1]) , (TFN1[2]+TFN2[2]) , (TFN1[3]+TFN2[3]))
+  TFN3
+}
+
+# Subtraction Function
+sub_TFN <- function(TFN1, TFN2) {
+  TFN3 <- c((TFN1[1]-TFN2[3]) , (TFN1[2]-TFN2[2]) , (TFN1[3]-TFN2[1]))
+  TFN3
+}
+
+# Multiplication Function
+mult_TFN <- function(TFN1, TFN2) {
+  TFN3 <- array(NA,3)
+  TFN3[1] <- min(TFN1[1]*TFN2[1] , TFN1[1]*TFN2[3] , TFN1[3]*TFN2[1] , TFN1[3]*TFN2[3])
+  TFN3[2] <- TFN1[2]*TFN2[2]
+  TFN3[3] <- max(TFN1[1]*TFN2[1] , TFN1[1]*TFN2[3] , TFN1[3]*TFN2[1] , TFN1[3]*TFN2[3])
+  TFN3
+}
+
+# Division Function
+div_TFN <- function(TFN1, TFN2) {
+  TFN3 <- array(NA,3)
+  TFN3[1] <- min(TFN1[1]/TFN2[1] , TFN1[1]/TFN2[3] , TFN1[3]/TFN2[1] , TFN1[3]/TFN2[3])
+  TFN3[2] <- TFN1[2]/TFN2[2]
+  TFN3[3] <- max(TFN1[1]/TFN2[1] , TFN1[1]/TFN2[3] , TFN1[3]/TFN2[1] , TFN1[3]/TFN2[3])
+  TFN3
+}
+
+# Fuzzify Ys
+fuzzify_Y <- function(Y, m, l=1, r=1){ 
+  center_point <- ifelse(Y == 0, 0, 1) 
+  set.seed(123) 
+  left_point <- array(NA, length(center_point))
+  
+  right_point <- array(NA, length(center_point))
+  left_point[which(center_point == 0)] <- 0 - l * m * runif(length(which(center_point == 0)), min = 0, max = fuzzy.Y.max) 
+  right_point[which(center_point == 0)]  <- 0 + r * m * runif(length(which(center_point == 0)), min = 0, max = fuzzy.Y.max)
+  
+  left_point[which(center_point == 1)] <- 1 - l * m * runif(length(which(center_point == 1)), min = 0, max = fuzzy.Y.max) 
+  right_point[which(center_point == 1)]  <- 1 + r * m * runif(length(which(center_point == 1)), min = 0, max = fuzzy.Y.max)
+  
+  TFN_Y_df <- data.frame(left_point, center_point, right_point) 
+  TFN_Y <- as.matrix(TFN_Y_df) 
+  return(TFN_Y)
+}
+
+# Function to estimate fuzzy probabilities
+Estimate_Y <- function(X, coef_matrix) {
+  Np <- ncol(X)
+  b0 <- coef_matrix[1, , drop = FALSE] # Extract the first row for b0
+  b <- coef_matrix[-1, , drop = FALSE] # Extract the rest for b
+  n <- nrow(X)
+  predy <- matrix(NA, nrow = n, ncol = 3)
+  for (i in 1:n) {
+    bx <- b0
+    for (j in 1:Np) {
+      bx <- add_TFN(bx, mult_TFN(b[j, , drop = FALSE], c(X[i, j], X[i, j], X[i, j])))
+    }
+    predy[i, ] <- div_TFN(c(1, 1, 1), (1 + exp(mult_TFN(c(-1, -1, -1), bx)))) # 1 /(1+exp(-X*b))
+  }
+  return(list("predictions" = predy, "b0" = b0, "bi" = b))
+}
+
+# Specificity
+specificity <- function(actuals, predictions) {
+  # Define the threshold for classification
+  threshold <- 0.5
+  # Convert the matrices to vectors
+  actuals_vec <- as.vector(actuals)
+  predictions_vec <- as.vector(predictions)
+  # Determine the true negatives and false positives
+  tn <- sum(actuals_vec < threshold & predictions_vec < threshold)
+  fp <- sum(actuals_vec < threshold & predictions_vec >= threshold)
+  # Calculate specificity
+  specificity <- tn / (tn + fp)
+  return(specificity)
+}
+
+
+# Sensitivity
+sensitivity <- function(actuals, predictions) {
+  # Define the threshold for classification
+  threshold <- 0.5
+  # Convert the matrices to vectors
+  actuals_vec <- as.vector(actuals)
+  predictions_vec <- as.vector(predictions)
+  # Determine the true positives and false negatives
+  tp <- sum(actuals_vec >= threshold & predictions_vec >= threshold)
+  fn <- sum(actuals_vec >= threshold & predictions_vec < threshold)
+  # Calculate sensitivity
+  sensitivity <- tp / (tp + fn)
+  return(sensitivity)
+}
+
+
+# F1 Score
+f1_score <- function(actuals, predictions) {
+  # Define the threshold for classification
+  threshold <- 0.5
+  # Convert the matrices to vectors
+  actuals_vec <- as.vector(actuals)
+  predictions_vec <- as.vector(predictions)
+  # Determine the true positives, false positives, and false negatives
+  tp <- sum(actuals_vec >= threshold & predictions_vec >= threshold)
+  fp <- sum(actuals_vec < threshold & predictions_vec >= threshold)
+  fn <- sum(actuals_vec >= threshold & predictions_vec < threshold)
+  # Calculate precision and recall
+  precision <- tp / (tp + fp)
+  recall <- tp / (tp + fn)
+  # Calculate F1 score
+  f1_score <- 2 * precision * recall / (precision + recall)
+  return(f1_score)
+}
+
+# MCC (Matthews Correlation Coefficient)
+MCC <- function(actual, predicted) {
+  # Calculate the MCC for each row of the matrices
+  m <- nrow(actual)
+  mcc_vals <- numeric(m)
+  for (i in 1:m) {
+    a <- actual[i, ]
+    p <- predicted[i, ]
+    # Calculate the confusion matrix
+    tp <- sum(p >= a & p <= a[3])
+    tn <- sum(p <= a & p >= a[1])
+    fp <- sum(p > a[3])
+    fn <- sum(p < a[1])
+    # Calculate MCC
+    num <- tp * tn - fp * fn
+    denom <- sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    if (denom == 0) {
+      mcc_vals[i] <- 0
+    } else {
+      mcc_vals[i] <- num / denom
+    }
+  }
+  # Return the average MCC across all rows
+  mean(mcc_vals)
+}
+#--------------------------------------------------------------------------------------------------#
+
+
+###############################################
+#### Online Data Implementation Simulation ####
+###############################################
+
+# Fuzzify and extract Ys and Xs
+Xmtx <- training_data_df[, !(names(training_data_df) %in% response_var)]
+Y <- training_data_df[[response_var]]
+TFN_Y <- fuzzify_Y(Y, Fuzzification_factor, l=left_point_symmetry, r=right_point_symmetry)
+
+# Estimate fuzzy probabilities
+Predictions_MCI <- matrix(nrow = nrow(Xmtx), ncol = 3)
+for (i in 1:nrow(Xmtx)) {
+  trans <- Xmtx[i,]
+  Predictions_MCI[i,] <- Estimate_Y(trans, coef_matrix)$predictions
+}
+
+# Classify fuzzy probabilities into fuzzy Ys
+TFNthreshold <- TriangularFuzzyNumber(fuzzy.threshold[1], fuzzy.threshold[2], fuzzy.threshold[3]) 
+ARRAYthreshold <- c(fuzzy.threshold[1], fuzzy.threshold[2], fuzzy.threshold[3])
+for (j in 1:nrow(Predictions_MCI)){
+  TFNprob <- TriangularFuzzyNumber(Predictions_MCI[j, 1], Predictions_MCI[j, 2], Predictions_MCI[j, 3])
+  diffTFN <- sub_TFN(Predictions_MCI[j, ], ARRAYthreshold)
+  if (expectedValue(TFNprob) < 0.5){
+    b_thresholded <- 0
+  } else {
+    b_thresholded <- 1
+  }
+  a_new <- b_thresholded - max(diffTFN)
+  c_new <- b_thresholded + max(diffTFN)
+  Predictions_MCI[j, 2] <- b_thresholded
+  Predictions_MCI[j, 1] <- a_new
+  Predictions_MCI[j, 3] <- c_new
+}
+
+
+# Performance Scores
+spec <- specificity(TFN_Y, Predictions_MCI)
+sens <- sensitivity(TFN_Y, Predictions_MCI)
+f1.s <- f1_score(TFN_Y, Predictions_MCI)
+mcc.s <- MCC(TFN_Y, Predictions_MCI)
+
+cat("Specificity =", spec,"\n")
+cat("Sensitivity =", sens,"\n")
+cat("F1 Score =", f1.s,"\n")
+cat("MCC Score =", mcc.s,"\n")
+#--------------------------------------------------------------------------------------------------#
+
+

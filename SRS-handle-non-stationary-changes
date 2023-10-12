@@ -1,1 +1,341 @@
-#
+
+## Select Dataset Settings ##
+#-----------------------------------------------------------------#
+file.name <- "file_name.csv"      # Name of data file
+n <- 5000                         # Desired sample size
+time.threshold <- 50000           # Time threshold (seconds)
+#-----------------------------------------------------------------#
+
+
+#-----------------------------------------------------------------#
+# Load the required library & data
+library(dplyr)
+data <- read.csv(file.name)
+
+
+# Split data into two different stratum 
+data1 <- data %>%
+  filter(Timestamps<=time.threshold)
+
+data2 <- data %>%
+  filter(Timestamps>time.threshold)
+#-----------------------------------------------------------------#
+
+
+
+# Random Sampling from data1 - stratum with recent data
+#-----------------------------------------------------------------#
+class_1.1 <- data1 %>%
+  filter(Class == 1)
+
+n_class_1.1 <- ceiling(0.002 * n)
+
+sample_class_1.1 <- class_1.1 %>%
+  sample_n(size = n_class_1.1)
+
+class_0.1 <- data %>%
+  filter(Class == 0)
+
+n_class_0.1 <- n - n_class_1.1
+
+sample_class_0.1 <- class_0.1 %>%
+  sample_n(size = n_class_0.1)
+
+final_sample.1 <- rbind(sample_class_1.1, sample_class_0.1)
+
+final_sample.1 <- final_sample.1 %>%
+  sample_n(size = n)
+#-----------------------------------------------------------------#
+
+
+
+# Random Sampling from data2 - stratum with older data
+#-----------------------------------------------------------------#
+class_1.2 <- data2 %>%
+  filter(Class == 1)
+
+n_class_1.2 <- ceiling(0.002 * n)
+
+sample_class_1.2 <- class_1.2 %>%
+  sample_n(size = n_class_1.2)
+
+class_0.2 <- data %>%
+  filter(Class == 0)
+
+n_class_0.2 <- n - n_class_1.2
+
+sample_class_0.2 <- class_0.2 %>%
+  sample_n(size = n_class_0.2)
+
+final_sample.2 <- rbind(sample_class_1.2, sample_class_0.2)
+
+final_sample.2 <- final_sample.2 %>%
+  sample_n(size = n)
+#-----------------------------------------------------------------#
+
+
+
+# Calculate variances for the first two strata
+#-----------------------------------------------------------------#
+
+# Calculate within-variance for both strata
+within_var_data1 <- var(data1$Class)
+within_var_data2 <- var(data2$Class)
+
+# Calculate overall mean
+overall_mean <- mean(c(mean(data1$Class), mean(data2$Class)))
+
+# Calculate between-variance
+between_var <- nrow(data1) * (mean(data1$Class) - overall_mean)^2 +
+  nrow(data2) * (mean(data2$Class) - overall_mean)^2
+
+# Calculate total variance
+total_variance <- within_var_data1 + within_var_data2 + between_var
+
+# Print the variance results
+cat("The Within-Variance for the first stratum is", within_var_data1, 
+    "while for the second stratum it is", within_var_data2,". Moreover, 
+    the Between-Variance for the two strata is", between_var, 
+    "and the Total Variance is", total_variance,".\n")
+
+# Function to calculate weight factor Wt
+calculate_weight_factor <- function(within_variance_1, within_variance_2) {
+  weight_factor <- within_variance_1 / (within_variance_1 + within_variance_2)
+  return(weight_factor)
+}
+
+# Estimate Weight Factor Wt
+time.sample.weight <- calculate_weight_factor(within_var_data1, within_var_data2)
+
+# Print the weight factor estimate
+cat("The recommended weight factor Wt is:", time.sample.weight, "\n")
+#-----------------------------------------------------------------#
+
+
+
+# Merge data from 2 stratum, using the weighting factor
+#-----------------------------------------------------------------#
+prop_class_final_sample1 <- mean(final_sample.1$Class)
+prop_class_final_sample2 <- mean(final_sample.2$Class)
+total_rows <- nrow(final_sample.1)
+
+# Calculate desired number of 1s and 0s in the merged dataset
+desired_ones_final_sample <- n*0.002
+desired_zeros_final_sample <- total_rows - desired_ones_final_sample
+
+# Subset final_sample.1 to achieve desired proportion of 1s
+subset_final_sample1 <- final_sample.1[final_sample.1$Class == 1, ][1:desired_ones_final_sample, ]
+subset_final_sample1 <- rbind(subset_final_sample1, final_sample.1[final_sample.1$Class == 0, ][1:desired_zeros_final_sample, ])
+
+# Calculate desired number of 1s and 0s in the final_sample.2 subset
+desired_ones_final_sample2 <- round((1 - time.sample.weight) * total_rows * prop_class_final_sample2)
+desired_zeros_final_sample2 <- total_rows - desired_ones_final_sample2
+
+# Subset final_sample.2 to achieve desired proportion of 1s
+subset_final_sample2 <- final_sample.2[final_sample.2$Class == 1, ][1:desired_ones_final_sample2, ]
+subset_final_sample2 <- rbind(subset_final_sample2, final_sample.2[final_sample.2$Class == 0, ][1:desired_zeros_final_sample2, ])
+
+# Merge the subsets using the given weights
+final_sample <- subset_final_sample1
+final_sample[, -which(names(subset_final_sample1) == "Class")] <- time.sample.weight * subset_final_sample1[, -which(names(subset_final_sample1) == "Class")]
+final_sample[, -which(names(subset_final_sample2) == "Class")] <- final_sample[, -which(names(subset_final_sample2) == "Class")] + (1 - time.sample.weight) * subset_final_sample2[, -which(names(subset_final_sample2) == "Class")]
+
+# Add the 'Class' column back to the merged dataset
+final_sample$Class <- c(rep(1, desired_ones_final_sample), rep(0, desired_zeros_final_sample))
+
+# Shuffle the rows of the final merged dataset
+final_sample <- final_sample[sample(nrow(final_sample)), ]
+
+
+write.csv(final_sample, "training_data.csv")
+#-----------------------------------------------------------------#
+
+
+
+# Run some checks of sample sizes to ensure it was done correctly
+#-----------------------------------------------------------------#
+n.of.total.df <- nrow(data)
+n.of.total.1 <- sum(data$Class)
+n.of.df <- nrow(final_sample)
+n.of.1 <- sum(final_sample$Class)
+rate.of.1 <- (round(n.of.1/n.of.df, 3))*100
+time.weight <- time.sample.weight*100
+days.weight <- round(time.threshold/60/24, 0)
+
+cat("The original data have a total N of", n.of.total.df, "and there are", n.of.total.1, "of Y=1 classes.",
+    "The final sample size has a total N of", n.of.df,",", "while there are", n.of.1, 
+    "classes of Y=1, keeping the same rate as in the original data of", rate.of.1, "%.",
+    "A weighting of", time.weight, "% is given towards more recent data of the last", days.weight, "days.\n.")
+#-----------------------------------------------------------------#
+
+
+## Select Dataset Settings ##
+#-----------------------------------------------------------------#
+file.name <- "creditcard_tuning.csv"  # Name of data file
+n <- 5000                         # Sample Size
+time.threshold <- 50000           # Time threshold (seconds)
+#-----------------------------------------------------------------#
+
+
+#-----------------------------------------------------------------#
+# Load the required library & data
+library(dplyr)
+data <- read.csv(file.name)
+
+
+# Split data into two different stratum 
+data1 <- data %>%
+  filter(Timestamps<=time.threshold)
+
+data2 <- data %>%
+  filter(Timestamps>time.threshold)
+#-----------------------------------------------------------------#
+
+
+
+# Random Sampling from data1 - stratum with recent data
+#-----------------------------------------------------------------#
+class_1.1 <- data1 %>%
+  filter(Class == 1)
+
+n_class_1.1 <- ceiling(0.002 * n)
+
+sample_class_1.1 <- class_1.1 %>%
+  sample_n(size = n_class_1.1)
+
+class_0.1 <- data %>%
+  filter(Class == 0)
+
+n_class_0.1 <- n - n_class_1.1
+
+sample_class_0.1 <- class_0.1 %>%
+  sample_n(size = n_class_0.1)
+
+final_sample.1 <- rbind(sample_class_1.1, sample_class_0.1)
+
+final_sample.1 <- final_sample.1 %>%
+  sample_n(size = n)
+#-----------------------------------------------------------------#
+
+
+
+# Random Sampling from data2 - stratum with older data
+#-----------------------------------------------------------------#
+class_1.2 <- data2 %>%
+  filter(Class == 1)
+
+n_class_1.2 <- ceiling(0.002 * n)
+
+sample_class_1.2 <- class_1.2 %>%
+  sample_n(size = n_class_1.2)
+
+class_0.2 <- data %>%
+  filter(Class == 0)
+
+n_class_0.2 <- n - n_class_1.2
+
+sample_class_0.2 <- class_0.2 %>%
+  sample_n(size = n_class_0.2)
+
+final_sample.2 <- rbind(sample_class_1.2, sample_class_0.2)
+
+final_sample.2 <- final_sample.2 %>%
+  sample_n(size = n)
+#-----------------------------------------------------------------#
+
+
+
+# Calculate variances for the first two strata
+#-----------------------------------------------------------------#
+
+# Calculate within-variance for both strata
+within_var_data1 <- var(data1$Class)
+within_var_data2 <- var(data2$Class)
+
+# Calculate overall mean
+overall_mean <- mean(c(mean(data1$Class), mean(data2$Class)))
+
+# Calculate between-variance
+between_var <- nrow(data1) * (mean(data1$Class) - overall_mean)^2 +
+  nrow(data2) * (mean(data2$Class) - overall_mean)^2
+
+# Calculate total variance
+total_variance <- within_var_data1 + within_var_data2 + between_var
+
+# Print the variance results
+cat("The Within-Variance for the first stratum is", within_var_data1, 
+    "while for the second stratum it is", within_var_data2,". Moreover, 
+    the Between-Variance for the two strata is", between_var, 
+    "and the Total Variance is", total_variance,".\n")
+
+# Function to calculate weight factor Wt
+calculate_weight_factor <- function(within_variance_1, within_variance_2) {
+  weight_factor <- within_variance_1 / (within_variance_1 + within_variance_2)
+  return(weight_factor)
+}
+
+# Estimate Weight Factor Wt
+time.sample.weight <- calculate_weight_factor(within_var_data1, within_var_data2)
+
+# Print the weight factor estimate
+cat("The recommended weight factor Wt is:", time.sample.weight, "\n")
+#-----------------------------------------------------------------#
+
+
+
+# Merge data from 2 stratum, using the weighting factor
+#-----------------------------------------------------------------#
+prop_class_final_sample1 <- mean(final_sample.1$Class)
+prop_class_final_sample2 <- mean(final_sample.2$Class)
+total_rows <- nrow(final_sample.1)
+
+# Calculate desired number of 1s and 0s in the merged dataset
+desired_ones_final_sample <- n*0.002
+desired_zeros_final_sample <- total_rows - desired_ones_final_sample
+
+# Subset final_sample.1 to achieve desired proportion of 1s
+subset_final_sample1 <- final_sample.1[final_sample.1$Class == 1, ][1:desired_ones_final_sample, ]
+subset_final_sample1 <- rbind(subset_final_sample1, final_sample.1[final_sample.1$Class == 0, ][1:desired_zeros_final_sample, ])
+
+# Calculate desired number of 1s and 0s in the final_sample.2 subset
+desired_ones_final_sample2 <- round((1 - time.sample.weight) * total_rows * prop_class_final_sample2)
+desired_zeros_final_sample2 <- total_rows - desired_ones_final_sample2
+
+# Subset final_sample.2 to achieve desired proportion of 1s
+subset_final_sample2 <- final_sample.2[final_sample.2$Class == 1, ][1:desired_ones_final_sample2, ]
+subset_final_sample2 <- rbind(subset_final_sample2, final_sample.2[final_sample.2$Class == 0, ][1:desired_zeros_final_sample2, ])
+
+# Merge the subsets using the given weights
+final_sample <- subset_final_sample1
+final_sample[, -which(names(subset_final_sample1) == "Class")] <- time.sample.weight * subset_final_sample1[, -which(names(subset_final_sample1) == "Class")]
+final_sample[, -which(names(subset_final_sample2) == "Class")] <- final_sample[, -which(names(subset_final_sample2) == "Class")] + (1 - time.sample.weight) * subset_final_sample2[, -which(names(subset_final_sample2) == "Class")]
+
+# Add the 'Class' column back to the merged dataset
+final_sample$Class <- c(rep(1, desired_ones_final_sample), rep(0, desired_zeros_final_sample))
+
+# Shuffle the rows of the final merged dataset
+final_sample <- final_sample[sample(nrow(final_sample)), ]
+
+
+write.csv(final_sample, "training_data.csv")
+#-----------------------------------------------------------------#
+
+
+
+# Run some checks of sample sizes to ensure it was done correctly
+#-----------------------------------------------------------------#
+n.of.total.df <- nrow(data)
+n.of.total.1 <- sum(data$Class)
+n.of.df <- nrow(final_sample)
+n.of.1 <- sum(final_sample$Class)
+rate.of.1 <- (round(n.of.1/n.of.df, 3))*100
+time.weight <- time.sample.weight*100
+days.weight <- round(time.threshold/60/24, 0)
+
+cat("The original data have a total N of", n.of.total.df, "and there are", n.of.total.1, "of Y=1 classes.",
+    "The final sample size has a total N of", n.of.df,",", "while there are", n.of.1, 
+    "classes of Y=1, keeping the same rate as in the original data of", rate.of.1, "%.",
+    "A weighting of", time.weight, "% is given towards more recent data of the last", days.weight, "days.\n.")
+#-----------------------------------------------------------------#
+
+
